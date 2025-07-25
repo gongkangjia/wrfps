@@ -1,0 +1,83 @@
+#!/home/kjgong/software/miniconda3/bin/python3
+from pathlib import Path
+from datetime import datetime, timedelta
+import f90nml
+import re
+from tqdm import tqdm
+import time
+import arrow
+wrf_dir = Path.cwd()
+
+
+def read_tail(filename, interval=1):
+    with open(filename, "r") as f:
+        yield from f.readlines()
+        while True:
+            where = f.tell()
+            line = f.readline().strip()
+            if not line:
+                time.sleep(interval)
+                f.seek(where)
+            else:
+                if line.endswith("elapsed seconds"):
+                    yield line
+
+
+nml = f90nml.read(wrf_dir.joinpath("namelist.input"))
+
+start = datetime(
+    nml["time_control"]["start_year"][0],
+    nml["time_control"]["start_month"][0],
+    nml["time_control"]["start_day"][0],
+    nml["time_control"]["start_hour"][0],
+)
+end = datetime(
+    nml["time_control"]["end_year"][0],
+    nml["time_control"]["end_month"][0],
+    nml["time_control"]["end_day"][0],
+    nml["time_control"]["end_hour"][0],
+)
+
+ts = (end - start).total_seconds()
+
+
+total_duration = 0
+
+with tqdm(
+    total=10,
+    bar_format="{l_bar} {bar} [{postfix[0][chtime]}/{postfix[0][thtime]:g},{postfix[0][rate]:.2g} hours/wrf-day, end {postfix[0][end]}]",
+    postfix=[{"chtime": 0, "thtime": int(ts // 3600), "rate": 0, "end": "Now"}],
+) as t:
+
+    for line in read_tail(wrf_dir.joinpath("rsl.error.0000")):
+        gd = re.search(
+            ".*? time (?P<wrf_cur_time>.*?) on domain .*? \d:[ ]+ (?P<elapsed>.*?) elapsed seconds$",
+            line,
+        )
+
+        if gd:
+            ds = gd.groupdict()
+            wrf_cur_time = datetime.strptime(gd["wrf_cur_time"], "%Y-%m-%d_%H:%M:%S")
+            total_duration = total_duration + float(gd["elapsed"])
+
+            t.n = int((wrf_cur_time - start).total_seconds() / 3600)
+            t.total = int(ts // 3600)
+
+            # 自定义参数
+            t.postfix[0]["chtime"] = int((wrf_cur_time - start).total_seconds() / 3600)
+            t.postfix[0]["rate"] = (
+                total_duration / (wrf_cur_time - start).total_seconds() * 24
+            )
+
+            # 计算结束时间
+            entat = (
+                timedelta(
+                    seconds=(end - wrf_cur_time).total_seconds()
+                    * total_duration
+                    / (wrf_cur_time - start).total_seconds()
+                )
+                + datetime.utcnow()
+            )
+            t.postfix[0]["end"] = arrow.get(entat).humanize()
+            t.display()
+
